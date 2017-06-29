@@ -25,13 +25,16 @@ amazonUrl = "https://www.amazon.com"
 maxPages = 400
 memory = {}
 alternateDevice = ''
-driverpath = "chromedriver"
+driverpath = "/usr/local/bin/chromedriver"
 # Parse the options from the command line
 def parse_options(argv):
-    global username, password, amazonsite, amazonUrl, genre, reducedOnly, categories, alternateDevice, memfile,driverpath
+    global username, password, amazonsite, amazonUrl, genre, reducedOnly, categories, alternateDevice, memfile, driverpath, language, toplevel
     reducedOnly = False
+    language = "English"
+    # for example using an argument for toplevel of 157028011 will limit to/find the subFiction categories
+    toplevel = "154606011"
     try:
-        opts, args = getopt.getopt(argv,"g:u:p:c:d:rm:e:",[])
+        opts, args = getopt.getopt(argv,"g:u:p:c:t:d:l:rm:e:",[])
     except getopt.GetoptError:
         usage()
         sys.exit(2)
@@ -42,6 +45,10 @@ def parse_options(argv):
             username = arg
         elif opt == '-p':
             password = arg
+        elif opt == '-l':
+            language = arg
+        elif opt == '-t':
+            toplevel = arg
         elif opt == '-r':
             reducedOnly = True
         elif opt == '-d':
@@ -60,7 +67,7 @@ def parse_options(argv):
 
 # Print usage and exit
 def usage():
-    print 'AmazonFreeBookCrawler.py -g "<all || genre;genre;...>" -u <amazonusername> -p <amazonpassword> -c <amazoncountry(us|au)>'
+    print 'AmazonFreeBookCrawler.py -g "<all || genre;genre;...>" -u <amazonusername> -p <amazonpassword> -c <amazoncountry(us|au)> -t <toplevelid> -l <language> -m <memoryfile>'
 
 # Handle Ctrl+C
 def signal_handler(signal, frame):
@@ -70,11 +77,9 @@ def signal_handler(signal, frame):
 
 # Ensure the categories selected by the user exist
 def validate_selected_categories(categoryDict):
-    driver.get(amazonUrl + "/gp/search/ref=sr_hi_2?rh=n%3A133140011%2Cn%3A%21133141011%2Cn%3A154606011&bbn=154606011")
-    driver.find_element_by_id('ref_154606011')
     for genre in categories:
         if genre not in categoryDict:
-            safe_print(genre + ' not available. Valid categories:')
+            safe_print(genre + ' category not available. Valid categories:')
             print(categoryDict.keys())
             exit(1)
 
@@ -102,9 +107,9 @@ def setUp():
         fileread.close()
         print('Found ' + str(len(memory.keys())) + ' books in memory')
     global driver
-    chromeOptions = webdriver.ChromeOptions()
-    chromeOptions.add_experimental_option("prefs", {'profile.managed_default_content_settings.images': 2})
-    driver = webdriver.Chrome(executable_path=driverpath,port=4444,chrome_options=chromeOptions)
+    # chromeOptions = webdriver.ChromeOptions()
+    # chromeOptions.add_experimental_option("prefs", {'profile.managed_default_content_settings.images': 2})
+    driver = webdriver.Chrome(driverpath)
 
 
 # Shut down cleanly
@@ -133,12 +138,15 @@ def main(argv):
 
 # Get the available categories from the site
 def getCategories():
+    global toplevel
     catarray = {}
-    driver.get("http://www.amazon.com/gp/search/ref=sr_hi_2?rh=n%3A133140011%2Cn%3A%21133141011%2Cn%3A154606011&bbn=154606011&sort=price-asc-rank")
-    listitems = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'ref_154606011'))).find_elements_by_tag_name('li')
+    url = "http://www.amazon.com/gp/search/ref=sr_hi_2?rh=n%3A133140011%2Cn%3A%21133141011%2Cn%3A" + toplevel + "&bbn=" + toplevel + "&sort=price-asc-rank"
+    driver.get(url)
+    leftNavContainer = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'leftNavContainer')))
+    listitems = leftNavContainer.find_element_by_class_name('s-ref-indent-two').find_elements_by_tag_name('li')
     for listitem in listitems:
-        if len(listitem.find_elements_by_class_name('refinementLink')) > 0:
-            name = listitem.find_element_by_class_name('refinementLink').text
+        if len(listitem.find_elements_by_class_name('s-ref-text-link')) > 0:
+            name = listitem.find_element_by_class_name('s-ref-text-link').text
             link = listitem.find_element_by_tag_name('a').get_attribute('href')
             catarray[name] = link
     return catarray
@@ -220,9 +228,18 @@ def write_known_book(key, value):
 
 # Check if the item is free and not previously purchased, commit
 def buyBookIfFree(url):
-    driver.get(url)
+    global language
+    try:
+         driver.get(url)
+    except TimeoutException:
+            print 'Amazon might be slow loading or acting up - retrying'
+            driver.get(url)            
     mem_id = get_book_id(url)
-    booktitle = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'ebooksProductTitle'))).text.strip()
+    try: 
+         booktitle = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'ebooksProductTitle'))).text.strip()
+    except TimeoutException:
+            print 'No title available'
+            return False
     if reducedOnly and len(driver.find_elements_by_class_name('ebooks-price-savings')) <= 0:
         safe_print('Skip normally free' + booktitle)
         return True
@@ -230,6 +247,10 @@ def buyBookIfFree(url):
         write_known_book(mem_id, booktitle)
         safe_print('Already bought ' + booktitle)
         return True
+    if foreignLanguage():
+        write_known_book(mem_id, booktitle)
+        safe_print('Not in ' + language + ' - ' + booktitle)
+        return False
     if not isBookFree():
         safe_print(booktitle + ' is NOT free')
         return False
@@ -278,7 +299,7 @@ def isBookFree():
         except TimeoutException:
             print 'No pricing available'
             return False
-    if kindle_price.text.strip().startswith('Kindle Price: $0.00') or (alt_price and kindle_price.text.strip().startswith('$0.00')):
+    if kindle_price.text.strip().startswith('Kindle Price: $0.00') or kindle_price.text.strip().startswith('Pre-order Price: $0.00') or (alt_price and kindle_price.text.strip().startswith('$0.00')):
         return True
     print 'Book not free ('+kindle_price.text.strip()+')'
     return False
@@ -288,6 +309,18 @@ def alreadyBought():
     divs = driver.find_elements_by_id('ebooksInstantOrderUpdate')
     for element in divs:
         if 'You purchased' in element.text:
+            return True
+    return False
+
+# Check if in English:
+
+def foreignLanguage():
+    global language
+    divs = driver.find_elements_by_id('aboutEbooksSection')
+    for element in divs:
+        if 'Language: ' in element.text:
+            if language in element.text:
+                return False
             return True
     return False
 
